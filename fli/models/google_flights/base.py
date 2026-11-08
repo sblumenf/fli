@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import (
     BaseModel,
+    Field,
     NonNegativeFloat,
     NonNegativeInt,
     PositiveInt,
@@ -460,6 +461,56 @@ class FlightResult(BaseModel):
         See :issue:`165` for the wire-format quirk that motivates this.
         """
         return self.price is None
+
+
+class PricePoint(BaseModel):
+    """One day of Google's "price history for this search" series.
+
+    ``timestamp`` is the instant Google labels the day with, converted to UTC.
+    Google emits local midnight for the viewer's timezone, so for a Toronto
+    request it reads 04:00 or 05:00 UTC depending on daylight saving. Treat
+    it as a day marker, not a precise moment. ``price`` is the lowest fare
+    Google saw that day, in whole units of the page's currency.
+    """
+
+    timestamp: datetime
+    price: NonNegativeInt
+
+
+class PriceInsights(BaseModel):
+    """Google's price-insights panel for a search.
+
+    Mirrors the "Prices are currently typical" panel and its history chart.
+    Amounts are whole units of the search page's currency (the ``curr``
+    parameter, otherwise Google's default for the request).
+
+    Google only shows this for some searches, so every field can be missing
+    and ``history`` can be empty. The block is read from the search page
+    and Google can move it without notice.
+    """
+
+    lowest_price: NonNegativeInt | None = None
+    typical_low: NonNegativeInt | None = None
+    typical_high: NonNegativeInt | None = None
+    history: list[PricePoint] = Field(default_factory=list)
+
+    @property
+    def level(self) -> Literal["low", "typical", "high"] | None:
+        """Where ``lowest_price`` sits against the typical range.
+
+        Derived rather than read from the wire: below ``typical_low`` is
+        "low", above ``typical_high`` is "high", otherwise "typical".
+        ``None`` when any of the three figures is missing. Checked against
+        one live search (CA$1,802 inside CA$1,350-2,200 shown as "typical");
+        the boundaries are an inference from that, not a documented rule.
+        """
+        if self.lowest_price is None or self.typical_low is None or self.typical_high is None:
+            return None
+        if self.lowest_price < self.typical_low:
+            return "low"
+        if self.lowest_price > self.typical_high:
+            return "high"
+        return "typical"
 
 
 class FlightSegment(BaseModel):

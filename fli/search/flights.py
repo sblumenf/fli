@@ -21,6 +21,7 @@ from fli.models import (
     FlightResult,
     FlightSearchFilters,
     PassengerInfo,
+    PriceInsights,
     SeatType,
 )
 from fli.models.google_flights.base import SortBy, TripType
@@ -29,6 +30,7 @@ from fli.search._decoders import (
     _try_parse_booking_row,  # noqa: F401 — back-compat re-export for tests
     parse_booking_chunk,
     parse_flight_row,
+    parse_price_insights,
 )
 from fli.search._tfs import (
     apply_client_side_filters,
@@ -182,6 +184,9 @@ class SearchFlights:
         # Set at the start of every search() call — see the
         # sparse_passenger_mix property.
         self._sparse_passenger_mix: bool = False
+        # Google's price-insights panel from the most recent search()'s first
+        # page — see the price_insights property.
+        self._price_insights: PriceInsights | None = None
 
     @property
     def sparse_passenger_mix(self) -> bool:
@@ -208,6 +213,20 @@ class SearchFlights:
         themselves.
         """
         return self._sparse_passenger_mix
+
+    @property
+    def price_insights(self) -> PriceInsights | None:
+        """Google's price insights for the most recent :meth:`search`.
+
+        Holds the typical price range, the lowest fare and the daily price
+        history Google shows for the search, or ``None`` when Google did not
+        include them. For round trips it describes the outbound search page,
+        not the follow-up return-leg pages. Reset at the start of every
+        :meth:`search` call, so a failed search never leaves the previous
+        search's figures behind. Same single-search-at-a-time caveat as
+        :attr:`sparse_passenger_mix`.
+        """
+        return self._price_insights
 
     # ------------------------------------------------------------------
     # Public search API
@@ -255,6 +274,7 @@ class SearchFlights:
         # Reset before any code below can raise, so a search that raises
         # never leaves a stale True from an earlier call on this instance.
         self._sparse_passenger_mix = False
+        self._price_insights = None
 
         if not isinstance(top_n, int) or isinstance(top_n, bool) or not 1 <= top_n <= 10:
             raise ValueError(
@@ -357,6 +377,7 @@ class SearchFlights:
 
         if capture_session:
             self._capture_session_id(inner)
+            self._price_insights = parse_price_insights(inner)
 
         try:
             flights_raw = [

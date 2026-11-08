@@ -13,7 +13,7 @@ booking-option row).
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fli.core import extract_currency_from_price_token
@@ -25,6 +25,8 @@ from fli.models import (
     FlightLeg,
     FlightResult,
     Layover,
+    PriceInsights,
+    PricePoint,
     SeatType,
 )
 from fli.search._helpers import as_bool, as_int, as_non_negative_int, as_str, safe_get
@@ -613,3 +615,75 @@ def _extract_fare_name(row: list) -> str | None:
         if isinstance(label, str) and label:
             return label
     return None
+
+
+# ---------------------------------------------------------------------------
+# Price insights ("Prices are currently typical" panel and history chart)
+# ---------------------------------------------------------------------------
+
+# Layout of ``inner[5]`` in the ``ds:1`` payload, from live captures of a
+# round-trip YYZ-NRT search (2026-11):
+#
+#   [5][1][1]   lowest fare for the search (whole currency units)
+#   [5][4][1]   low end of Google's "typical" range
+#   [5][5][1]   high end of Google's "typical" range
+#   [5][10][0]  price history: [[epoch_ms, price], ...], one per day
+#
+# Other slots in the block ([0], [2], [3], [6]) are not decoded: their meaning
+# is unconfirmed, so nothing here reads them. The level label is derived in
+# ``PriceInsights.level`` rather than read from slot [0].
+
+# Epoch-millisecond bounds a history timestamp must fall between (2001-2100),
+# so a slot that changes meaning is skipped instead of producing absurd dates.
+_HISTORY_MS_MIN = 1_000_000_000_000
+_HISTORY_MS_MAX = 4_102_444_800_000
+
+
+def parse_price_insights(inner: Any) -> PriceInsights | None:
+    """Decode the price-insights block from a ``ds:1`` payload.
+
+    Total by construction: any missing, short or mistyped slot is treated as
+    absent rather than raising, because Google shows this panel only for some
+    searches and the result rows must never fail because of it.
+
+    Returns:
+        A :class:`PriceInsights`, or ``None`` when the payload carries no
+        usable figure and no history.
+
+    """
+    block = safe_get(inner, 5)
+    if not isinstance(block, list):
+        return None
+
+    def amount(index: int) -> int | None:
+        return as_non_negative_int(safe_get(safe_get(block, index), 1))
+
+    lowest = amount(1)
+    typical_low = amount(4)
+    typical_high = amount(5)
+    # A reversed range means the slots no longer mean what we think; drop both.
+    if typical_low is not None and typical_high is not None and typical_low > typical_high:
+        typical_low = typical_high = None
+
+    history: list[PricePoint] = []
+    raw_history = safe_get(safe_get(block, 10), 0)
+    if isinstance(raw_history, list):
+        for pair in raw_history:
+            ms = as_int(safe_get(pair, 0))
+            price = as_non_negative_int(safe_get(pair, 1))
+            if ms is None or price is None or not _HISTORY_MS_MIN <= ms <= _HISTORY_MS_MAX:
+                continue
+            history.append(
+                PricePoint(
+                    timestamp=datetime.fromtimestamp(ms / 1000, tz=timezone.utc), price=price
+                )
+            )
+
+    if lowest is None and typical_low is None and typical_high is None and not history:
+        return None
+    return PriceInsights(
+        lowest_price=lowest,
+        typical_low=typical_low,
+        typical_high=typical_high,
+        history=history,
+    )
